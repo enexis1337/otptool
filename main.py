@@ -1,0 +1,835 @@
+#!/usr/bin/env python3
+"""
+Flipper Zero — OTP Generator / Reader  (Flet desktop GUI)
+pip install flet
+"""
+
+import os, re, struct, datetime, socket, threading
+import flet as ft
+
+OTP_MAGIC    = 0xBABE
+OTP_VERSION  = 0x02
+OTP_RESERVED = 0x00
+
+OTP_COLORS   = {"unknown": 0x00, "black": 0x01, "white": 0x02, "transparent": 0x03}
+OTP_REGIONS  = {"unknown": 0x00, "eu_ru": 0x01, "us_ca_au": 0x02, "jp": 0x03, "world": 0x04}
+OTP_DISPLAYS = {"unknown": 0x00, "erc": 0x01, "mgg": 0x02}
+
+COLORS_R   = {v: k for k, v in OTP_COLORS.items()}
+REGIONS_R  = {v: k for k, v in OTP_REGIONS.items()}
+DISPLAYS_R = {v: k for k, v in OTP_DISPLAYS.items()}
+
+# OTP memory addresses (STM32WB55)
+OTP_ADDR_FIRST  = 0x1FFF7000   # first block  (16 bytes)
+OTP_ADDR_SECOND = 0x1FFF7010   # second block (16 bytes)
+
+BG       = "#0F1117"
+PANEL    = "#1A1D27"
+BORDER   = "#2D3148"
+ACCENT   = "#4D7CFE"
+ACCENT_H = "#3D6AEE"
+TEXT     = "#E2E8F0"
+TEXT_DIM = "#4A5568"
+INPUT_BG = "#13151F"
+LOG_BG   = "#0C0E16"
+LOG_FG   = "#7C8DB5"
+ERR      = "#F87171"
+OK_C     = "#4ADE80"
+WARN     = "#FBBF24"
+FONT     = "Segoe UI"
+
+LANGS = {
+    "ru": {
+        "tab_generate": "Generate", "tab_read": "Read",
+        "ver": "Версия", "fw": "ПО", "body": "Корпус", "conn": "Разъём",
+        "display": "Дисплей", "color": "Цвет", "region": "Регион",
+        "name": "Имя", "outdir": "Папка вывода", "prefix": "Префикс",
+        "timestamp": "Timestamp (unix, необяз.)",
+        "log": "Лог", "clear": "Очистить",
+        "generate": "Генерировать", "merge": "Объединить",
+        "ready": "Готово",
+        "status_ok": "Сгенерировано", "status_merged": "Файлы объединены",
+        "status_err": "Ошибка", "status_inv": "Неверный ввод",
+        "status_name": "Неверное имя",
+        "started": "otptool запущен!",
+        "err_int":      "ОШИБКА: числовые поля должны быть целыми числами",
+        "err_name":     "ОШИБКА: Имя — только [a-zA-Z0-9.], от 1 до 8 символов",
+        "err_ts":       "ОШИБКА: Timestamp должен быть целым числом",
+        "err_merge":    "ОШИБКА: сначала сгенерируйте файлы",
+        "err_merge_ex": "ОШИБКА объединения: ",
+        "merge_ok":     "✓ Объединено →",
+        "lang_btn":     "EN",
+        "tooltip_browse": "Обзор",
+        "tooltip_merge":  "Объединить два .bin в один файл",
+        "color_opts":   [("unknown","Неизвестно"),("black","Чёрный"),
+                         ("white","Белый"),("transparent","Прозрачный")],
+        "region_opts":  [("unknown","Неизвестно"),("eu_ru","EU/RU"),
+                         ("us_ca_au","US/CA/AU"),("jp","Япония"),("world","Мир")],
+        "display_opts": [("unknown","Неизвестно"),("erc","ERC"),("mgg","MGG")],
+        # read tab
+        "read_host":      "Хост OpenOCD",
+        "read_port":      "TCL порт",
+        "read_iface":     "Интерфейс",
+        "read_serial":    "Серийный номер (необяз.)",
+        "read_btn":       "Прочитать OTP",
+        "read_clear":     "Очистить",
+        "read_hint":      "Подключите Flipper Zero и запустите OpenOCD, затем нажмите «Прочитать OTP»",
+        "read_connecting":"Подключение к OpenOCD...",
+        "read_reading":   "Чтение OTP из памяти...",
+        "read_ok":        "OTP прочитан успешно",
+        "read_err":       "Ошибка чтения",
+        "read_conn_err":  "Нет соединения с OpenOCD",
+        "read_bad_magic": "ОШИБКА: неверный Magic (ожидается 0xBABE)",
+        "read_bad_data":  "ОШИБКА: некорректные данные OTP",
+        "field_magic":    "Magic",
+        "field_version":  "OTP Version",
+        "field_ts":       "Timestamp",
+        "field_ver":      "Версия",
+        "field_fw":       "ПО",
+        "field_body":     "Корпус",
+        "field_conn":     "Разъём",
+        "field_display":  "Дисплей",
+        "field_color":    "Цвет",
+        "field_region":   "Регион",
+        "field_name":     "Имя",
+    },
+    "en": {
+        "tab_generate": "Generate", "tab_read": "Read",
+        "ver": "Ver", "fw": "FW", "body": "Body", "conn": "Conn",
+        "display": "Display", "color": "Color", "region": "Region",
+        "name": "Name", "outdir": "Output Dir", "prefix": "Prefix",
+        "timestamp": "Timestamp (unix, optional)",
+        "log": "Log", "clear": "Clear",
+        "generate": "Generate", "merge": "Merge",
+        "ready": "Ready",
+        "status_ok": "Generated OK", "status_merged": "Files merged",
+        "status_err": "Error", "status_inv": "Invalid input",
+        "status_name": "Invalid name",
+        "started": "otptool is started!",
+        "err_int":      "ERROR: numeric fields must be integers",
+        "err_name":     "ERROR: Name must be [a-zA-Z0-9.], 1-8 chars",
+        "err_ts":       "ERROR: Timestamp must be an integer",
+        "err_merge":    "ERROR: generate files first",
+        "err_merge_ex": "ERROR merging: ",
+        "merge_ok":     "✓ Merged ->",
+        "lang_btn":     "RU",
+        "tooltip_browse": "Browse",
+        "tooltip_merge":  "Merge two .bin files into one",
+        "color_opts":   [("unknown","Unknown"),("black","Black"),
+                         ("white","White"),("transparent","Transparent")],
+        "region_opts":  [("unknown","Unknown"),("eu_ru","EU/RU"),
+                         ("us_ca_au","US/CA/AU"),("jp","Japan"),("world","World")],
+        "display_opts": [("unknown","Unknown"),("erc","ERC"),("mgg","MGG")],
+        # read tab
+        "read_host":      "OpenOCD Host",
+        "read_port":      "TCL Port",
+        "read_iface":     "Interface",
+        "read_serial":    "Serial number (optional)",
+        "read_btn":       "Read OTP",
+        "read_clear":     "Clear",
+        "read_hint":      "Connect Flipper Zero and start OpenOCD, then press «Read OTP»",
+        "read_connecting":"Connecting to OpenOCD...",
+        "read_reading":   "Reading OTP from memory...",
+        "read_ok":        "OTP read successfully",
+        "read_err":       "Read error",
+        "read_conn_err":  "Cannot connect to OpenOCD",
+        "read_bad_magic": "ERROR: invalid Magic (expected 0xBABE)",
+        "read_bad_data":  "ERROR: invalid OTP data",
+        "field_magic":    "Magic",
+        "field_version":  "OTP Version",
+        "field_ts":       "Timestamp",
+        "field_ver":      "Ver",
+        "field_fw":       "FW",
+        "field_body":     "Body",
+        "field_conn":     "Conn",
+        "field_display":  "Display",
+        "field_color":    "Color",
+        "field_region":   "Region",
+        "field_name":     "Name",
+    },
+}
+
+
+# ── OTP pack / parse ──────────────────────────────────────────────────────────
+
+def pack_first(ver, fw, body, conn, display, timestamp=None) -> bytes:
+    ts = int(timestamp) if timestamp is not None else int(datetime.datetime.now().timestamp())
+    return struct.pack(
+        "<HBBLBBBBBBH",
+        OTP_MAGIC, OTP_VERSION, OTP_RESERVED, ts,
+        ver, fw, body, conn, OTP_DISPLAYS[display],
+        OTP_RESERVED, OTP_RESERVED,
+    )
+
+def pack_second(color, region, name: str) -> bytes:
+    return struct.pack(
+        "<BBHL8s",
+        OTP_COLORS[color], OTP_REGIONS[region],
+        OTP_RESERVED, OTP_RESERVED,
+        name.encode("ascii"),
+    )
+
+def validate_name(name: str) -> bool:
+    return 1 <= len(name) <= 8 and bool(re.match(r"^[a-zA-Z0-9.]+$", name))
+
+def merge_bins(path1: str, path2: str, out_path: str) -> int:
+    with open(path1, "rb") as f1, open(path2, "rb") as f2:
+        data = f1.read() + f2.read()
+    with open(out_path, "wb") as fo:
+        fo.write(data)
+    return len(data)
+
+def parse_otp(data: bytes) -> dict:
+    """Parse 32-byte combined OTP dump."""
+    if len(data) < 16:
+        raise ValueError("bad_data")
+
+    first = data[:16]
+    magic, otp_ver, _, ts, ver, fw, body, conn, display_raw, _, _ = struct.unpack(
+        "<HBBLBBBBBBH", first
+    )
+    if magic != OTP_MAGIC:
+        raise ValueError("bad_magic")
+
+    ts_human = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
+    display  = DISPLAYS_R.get(display_raw, f"0x{display_raw:02X}")
+
+    result = {
+        "magic": f"0x{magic:04X}", "otp_ver": otp_ver,
+        "ts_raw": ts, "ts_human": ts_human,
+        "ver": ver, "fw": fw, "body": body, "conn": conn, "display": display,
+    }
+
+    if len(data) >= 32:
+        second = data[16:32]
+        color_raw, region_raw, _, _, name_raw = struct.unpack("<BBHL8s", second)
+        result.update({
+            "color":  COLORS_R.get(color_raw,   f"0x{color_raw:02X}"),
+            "region": REGIONS_R.get(region_raw, f"0x{region_raw:02X}"),
+            "name":   name_raw.rstrip(b"\x00").decode("ascii", errors="replace"),
+        })
+
+    return result
+
+
+# ── OpenOCD TCL RPC ───────────────────────────────────────────────────────────
+
+class OpenOCDTCL:
+    """
+    Minimal client for OpenOCD TCL RPC interface (default port 6666).
+    Sends a TCL command, reads response terminated by 0x1A.
+    """
+    TOKEN = b"\x1a"
+
+    def __init__(self, host: str = "localhost", port: int = 6666, timeout: float = 5.0):
+        self.host    = host
+        self.port    = port
+        self.timeout = timeout
+        self._sock   = None
+
+    def connect(self):
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.settimeout(self.timeout)
+        self._sock.connect((self.host, self.port))
+
+    def close(self):
+        if self._sock:
+            try: self._sock.close()
+            except: pass
+            self._sock = None
+
+    def cmd(self, command: str) -> str:
+        """Send a TCL command and return the response string."""
+        self._sock.sendall((command + "\x1a").encode())
+        buf = b""
+        while True:
+            chunk = self._sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            if self.TOKEN in buf:
+                break
+        return buf.rstrip(self.TOKEN).decode(errors="replace").strip()
+
+    def read_memory(self, address: int, count: int) -> bytes:
+        """
+        Read `count` bytes from memory via 'read_memory addr 8 count'.
+        OpenOCD returns a Tcl list of decimal byte values.
+        """
+        resp = self.cmd(f"read_memory 0x{address:08X} 8 {count}")
+        # resp is a space-separated list of decimal integers
+        parts = resp.split()
+        if len(parts) < count:
+            raise RuntimeError(f"Expected {count} bytes, got {len(parts)}: {resp!r}")
+        return bytes(int(p) for p in parts[:count])
+
+    def halt(self):
+        self.cmd("halt")
+
+    def resume(self):
+        self.cmd("resume")
+
+    def init_target(self, interface: str, serial: str = ""):
+        """
+        Re-initialize target with given interface config.
+        Only needed if OpenOCD is already running with a different config.
+        In typical use the user starts OpenOCD manually so we skip this.
+        """
+        pass
+
+
+def read_otp_from_device(host: str, port: int) -> bytes:
+    """
+    Connect to OpenOCD TCL RPC, halt target, read 32 bytes of OTP, resume.
+    Returns raw 32-byte OTP data.
+    """
+    ocd = OpenOCDTCL(host=host, port=port, timeout=8.0)
+    ocd.connect()
+    try:
+        ocd.halt()
+        first  = ocd.read_memory(OTP_ADDR_FIRST,  16)
+        second = ocd.read_memory(OTP_ADDR_SECOND, 16)
+        ocd.resume()
+        return first + second
+    finally:
+        ocd.close()
+
+
+# ── GUI ───────────────────────────────────────────────────────────────────────
+
+def main(page: ft.Page):
+    page.title            = "otptool"
+    page.bgcolor          = BG
+    page.window.width     = 640
+    page.window.height    = 540
+    page.window.resizable = False
+    page.padding          = 0
+
+    lang_state     = {"current": "ru"}
+    last_generated = {"p1": None, "p2": None}
+
+    def T(key: str) -> str:
+        return LANGS[lang_state["current"]][key]
+
+    TS = ft.TextStyle(size=12, color=TEXT, font_family=FONT)
+
+    def tf(val="", expand=True, max_length=None, hint="") -> ft.TextField:
+        return ft.TextField(
+            value=val, expand=expand, max_length=max_length,
+            hint_text=hint,
+            hint_style=ft.TextStyle(size=11, color=TEXT_DIM),
+            text_style=TS,
+            border=ft.InputBorder.OUTLINE,
+            bgcolor=INPUT_BG, border_color=BORDER,
+            focused_border_color=ACCENT, focused_bgcolor=INPUT_BG,
+            border_radius=6, border_width=1, dense=True,
+            content_padding=ft.padding.symmetric(horizontal=8, vertical=8),
+            cursor_color=ACCENT,
+        )
+
+    def make_dd(opts_key: str, default: str) -> ft.Dropdown:
+        return ft.Dropdown(
+            value=default, expand=True,
+            options=[ft.dropdown.Option(key=k, text=t) for k, t in T(opts_key)],
+            text_style=TS,
+            border=ft.InputBorder.OUTLINE,
+            bgcolor=INPUT_BG, border_color=BORDER,
+            focused_border_color=ACCENT,
+            border_radius=6, border_width=1, dense=True,
+            padding=ft.padding.symmetric(horizontal=8, vertical=8),
+        )
+
+    gen_lbl_refs:  dict[str, ft.Text] = {}
+    read_lbl_refs: dict[str, ft.Text] = {}
+
+    def lbl(key: str, refs: dict) -> ft.Text:
+        t = ft.Text(T(key), size=10, color=TEXT_DIM, font_family=FONT,
+                    weight=ft.FontWeight.W_500)
+        refs[key] = t
+        return t
+
+    def field(lbl_key: str, ctrl, refs: dict, expand=True):
+        return ft.Column([lbl(lbl_key, refs), ctrl], spacing=3,
+                         expand=expand, tight=True)
+
+    def panel(content, expand=False, width=None):
+        return ft.Container(
+            content=content, bgcolor=PANEL,
+            border=ft.border.all(1, BORDER), border_radius=10,
+            padding=12, expand=expand, width=width,
+            shadow=ft.BoxShadow(blur_radius=8, spread_radius=0,
+                                color="#40000000", offset=ft.Offset(0, 2)),
+        )
+
+    def filled_style(bg, bg_h, bg_p, px=20):
+        return ft.ButtonStyle(
+            bgcolor={ft.ControlState.DEFAULT: bg,
+                     ft.ControlState.HOVERED: bg_h,
+                     ft.ControlState.PRESSED: bg_p},
+            color="#FFFFFF",
+            shape=ft.RoundedRectangleBorder(radius=8),
+            text_style=ft.TextStyle(font_family=FONT, size=12,
+                                    weight=ft.FontWeight.W_600),
+            padding=ft.padding.symmetric(horizontal=px, vertical=8),
+        )
+
+    # ── status bar ────────────────────────────────────────────────────────────
+    status_dot  = ft.Container(width=7, height=7, bgcolor=ACCENT, border_radius=4)
+    status_text = ft.Text(T("ready"), size=10, color=TEXT_DIM, font_family=FONT)
+
+    def set_status(key: str, ok: bool = True):
+        status_dot.bgcolor = OK_C if ok else ERR
+        status_text.value  = T(key)
+        page.update()
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — GENERATE
+    # ══════════════════════════════════════════════════════════════════════════
+
+    tf_ver    = tf("15")
+    tf_fw     = tf("7")
+    tf_body   = tf("9")
+    tf_conn   = tf("6")
+    tf_name   = tf("Flipper1", max_length=8)
+    tf_ts     = tf("", hint="auto")
+    tf_outdir = tf(os.path.expanduser("~"))
+    tf_prefix = tf("otp")
+
+    sel_display = make_dd("display_opts", "mgg")
+    sel_color   = make_dd("color_opts",   "white")
+    sel_region  = make_dd("region_opts",  "world")
+
+    gen_log_view = ft.ListView(expand=True, spacing=1, auto_scroll=True)
+
+    def gen_log(msg: str, color=LOG_FG):
+        gen_log_view.controls.append(
+            ft.Text(msg, size=11, color=color, font_family=FONT, selectable=True))
+        page.update()
+
+    def do_generate(e):
+        try:
+            ver  = int(tf_ver.value or 0)
+            fw   = int(tf_fw.value or 0)
+            body = int(tf_body.value or 0)
+            conn = int(tf_conn.value or 0)
+        except ValueError:
+            gen_log(T("err_int"), ERR); set_status("status_inv", False); return
+
+        ts_val = None
+        if tf_ts.value and tf_ts.value.strip():
+            try:
+                ts_val = int(tf_ts.value.strip())
+            except ValueError:
+                gen_log(T("err_ts"), ERR); set_status("status_inv", False); return
+
+        name = tf_name.value or ""
+        if not validate_name(name):
+            gen_log(T("err_name"), ERR); set_status("status_name", False); return
+
+        outdir = tf_outdir.value or os.path.expanduser("~")
+        prefix = os.path.join(outdir, tf_prefix.value or "otp")
+        b1 = pack_first(ver, fw, body, conn, sel_display.value, timestamp=ts_val)
+        b2 = pack_second(sel_color.value, sel_region.value, name)
+        used_ts = ts_val if ts_val is not None else int(datetime.datetime.now().timestamp())
+
+        try:
+            p1, p2 = f"{prefix}_first.bin", f"{prefix}_second.bin"
+            with open(p1, "wb") as f: f.write(b1)
+            with open(p2, "wb") as f: f.write(b2)
+            last_generated["p1"] = p1
+            last_generated["p2"] = p2
+            ts_str = datetime.datetime.fromtimestamp(used_ts).strftime("%Y-%m-%d %H:%M:%S")
+            gen_log(f"✓ {p1}  [{len(b1)}B]", OK_C)
+            gen_log(f"✓ {p2}  [{len(b2)}B]", OK_C)
+            gen_log(f"  timestamp: {used_ts}  ({ts_str})", LOG_FG)
+            set_status("status_ok")
+        except Exception as ex:
+            gen_log(f"{T('status_err')}: {ex}", ERR); set_status("status_err", False)
+
+    def do_merge(e):
+        p1 = last_generated.get("p1")
+        p2 = last_generated.get("p2")
+        if not p1 or not p2 or not os.path.exists(p1) or not os.path.exists(p2):
+            gen_log(T("err_merge"), WARN); set_status("status_err", False); return
+        outdir = tf_outdir.value or os.path.expanduser("~")
+        out = os.path.join(outdir, (tf_prefix.value or "otp") + "_combined.bin")
+        try:
+            size = merge_bins(p1, p2, out)
+            gen_log(f"{T('merge_ok')} {out}  [{size}B]", OK_C)
+            set_status("status_merged")
+        except Exception as ex:
+            gen_log(f"{T('err_merge_ex')}{ex}", ERR); set_status("status_err", False)
+
+    def pick_outdir(e: ft.FilePickerResultEvent):
+        if e.path:
+            tf_outdir.value = e.path
+            page.update()
+
+    outdir_picker = ft.FilePicker(on_result=pick_outdir)
+    page.overlay.append(outdir_picker)
+
+    browse_btn = ft.IconButton(
+        icon=ft.Icons.FOLDER_OPEN_OUTLINED,
+        icon_color=TEXT_DIM, icon_size=15,
+        on_click=lambda e: outdir_picker.get_directory_path(),
+        style=ft.ButtonStyle(padding=ft.padding.all(2)),
+        tooltip=T("tooltip_browse"),
+    )
+
+    gen_btn   = ft.FilledButton(text=T("generate"), on_click=do_generate,
+                                style=filled_style(ACCENT, ACCENT_H, "#2D55CC", 24))
+    merge_btn = ft.FilledButton(text=T("merge"),    on_click=do_merge,
+                                style=filled_style("#2A4A2A", "#3A6A3A", "#1E361E", 16),
+                                tooltip=T("tooltip_merge"))
+
+    gen_log_title = ft.Text(T("log"), size=10, color=TEXT_DIM, font_family=FONT,
+                            weight=ft.FontWeight.W_600)
+    gen_clear_btn = ft.TextButton(
+        T("clear"),
+        on_click=lambda e: [gen_log_view.controls.clear(), page.update()],
+        style=ft.ButtonStyle(
+            color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
+            padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            text_style=ft.TextStyle(size=10, font_family=FONT),
+        ),
+    )
+
+    gen_left = panel(ft.Column([
+        ft.Row([
+            field("ver",  tf_ver,  gen_lbl_refs),
+            field("fw",   tf_fw,   gen_lbl_refs),
+            field("body", tf_body, gen_lbl_refs),
+            field("conn", tf_conn, gen_lbl_refs),
+        ], spacing=6),
+        ft.Row([
+            field("display", sel_display, gen_lbl_refs),
+            field("color",   sel_color,   gen_lbl_refs),
+            field("region",  sel_region,  gen_lbl_refs),
+        ], spacing=6),
+        field("name",      tf_name,   gen_lbl_refs),
+        field("timestamp", tf_ts,     gen_lbl_refs),
+        field("outdir", ft.Row([tf_outdir, browse_btn], spacing=4, expand=True,
+              vertical_alignment=ft.CrossAxisAlignment.CENTER), gen_lbl_refs),
+        field("prefix", tf_prefix, gen_lbl_refs),
+    ], spacing=6, tight=True), width=290)
+
+    gen_right = panel(ft.Column([
+        ft.Row([gen_log_title, ft.Container(expand=True), gen_clear_btn],
+               vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Container(
+            content=gen_log_view, bgcolor=LOG_BG,
+            border=ft.border.all(1, BORDER),
+            border_radius=6, padding=8, expand=True,
+        ),
+    ], spacing=4, expand=True), expand=True)
+
+    gen_tab_content = ft.Column([
+        ft.Container(
+            content=ft.Row([gen_left, gen_right], spacing=8, expand=True),
+            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            expand=True,
+        ),
+        ft.Container(
+            content=ft.Row([
+                ft.Container(expand=True), merge_btn,
+                ft.Container(width=6), gen_btn,
+            ]),
+            padding=ft.padding.only(left=10, right=10, bottom=6, top=0),
+        ),
+    ], spacing=0, expand=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — READ  (OpenOCD TCL RPC)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    tf_ocd_host   = tf("localhost", expand=True)
+    tf_ocd_port   = tf("6666", expand=False)
+    tf_ocd_port.width = 72
+
+    read_result_col = ft.Column([], spacing=5, scroll=ft.ScrollMode.AUTO)
+
+    read_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2,
+                                   color=ACCENT, visible=False)
+
+    read_hint_text = ft.Text(
+        T("read_hint"), size=10, color=TEXT_DIM, font_family=FONT,
+        text_align=ft.TextAlign.CENTER,
+    )
+
+    def render_parse_result(parsed: dict):
+        read_result_col.controls.clear()
+        L = LANGS[lang_state["current"]]
+
+        def row(field_key: str, value, highlight=False):
+            val_color = OK_C if highlight else TEXT
+            read_result_col.controls.append(ft.Row([
+                ft.Text(L[field_key], size=11, color=TEXT_DIM,
+                        font_family=FONT, width=110),
+                ft.Text(str(value), size=11, color=val_color,
+                        font_family=FONT, selectable=True, expand=True),
+            ], spacing=8))
+
+        def div():
+            read_result_col.controls.append(
+                ft.Container(height=1, bgcolor=BORDER,
+                             margin=ft.margin.symmetric(vertical=2)))
+
+        row("field_magic",   parsed["magic"])
+        row("field_version", parsed["otp_ver"])
+        row("field_ts",      f"{parsed['ts_raw']}  ({parsed['ts_human']})")
+        div()
+        row("field_ver",     parsed["ver"])
+        row("field_fw",      parsed["fw"])
+        row("field_body",    parsed["body"])
+        row("field_conn",    parsed["conn"])
+        row("field_display", parsed["display"])
+        if "color" in parsed:
+            div()
+            row("field_color",  parsed["color"])
+            row("field_region", parsed["region"])
+            row("field_name",   parsed["name"], highlight=True)
+
+        page.update()
+
+    read_log_view = ft.ListView(expand=True, spacing=1, auto_scroll=True)
+
+    def read_log(msg: str, color=LOG_FG):
+        read_log_view.controls.append(
+            ft.Text(msg, size=11, color=color, font_family=FONT, selectable=True))
+        page.update()
+
+    def set_read_busy(busy: bool):
+        read_spinner.visible = busy
+        read_btn.disabled    = busy
+        page.update()
+
+    def do_read_otp(e):
+        host = tf_ocd_host.value.strip() or "localhost"
+        try:
+            port = int(tf_ocd_port.value.strip())
+        except ValueError:
+            read_log("ERROR: invalid port", ERR); return
+
+        def worker():
+            set_read_busy(True)
+            read_log(T("read_connecting"), LOG_FG)
+            try:
+                raw = read_otp_from_device(host, port)
+                read_log(T("read_reading"), LOG_FG)
+                parsed = parse_otp(raw)
+                render_parse_result(parsed)
+                read_log(f"✓  {T('read_ok')}  [{len(raw)}B]", OK_C)
+                set_status("read_ok")
+            except ConnectionRefusedError:
+                read_log(f"✗  {T('read_conn_err')} ({host}:{port})", ERR)
+                set_status("read_err", False)
+            except OSError as ex:
+                read_log(f"✗  {T('read_conn_err')}: {ex}", ERR)
+                set_status("read_err", False)
+            except ValueError as ve:
+                key = f"read_{ve}"
+                msg = LANGS[lang_state["current"]].get(key, str(ve))
+                read_log(f"✗  {msg}", ERR)
+                set_status("read_err", False)
+            except Exception as ex:
+                read_log(f"✗  {T('read_err')}: {ex}", ERR)
+                set_status("read_err", False)
+            finally:
+                set_read_busy(False)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def do_read_clear(e):
+        read_result_col.controls.clear()
+        read_log_view.controls.clear()
+        set_status("ready")
+        page.update()
+
+    read_btn = ft.FilledButton(
+        text=T("read_btn"),
+        on_click=do_read_otp,
+        style=filled_style(ACCENT, ACCENT_H, "#2D55CC", 20),
+    )
+    read_clear_btn = ft.TextButton(
+        T("read_clear"),
+        on_click=do_read_clear,
+        style=ft.ButtonStyle(
+            color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
+            padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            text_style=ft.TextStyle(size=10, font_family=FONT),
+        ),
+    )
+
+    read_host_lbl = ft.Text(T("read_host"), size=10, color=TEXT_DIM,
+                             font_family=FONT, weight=ft.FontWeight.W_500)
+    read_port_lbl = ft.Text(T("read_port"), size=10, color=TEXT_DIM,
+                             font_family=FONT, weight=ft.FontWeight.W_500)
+    read_lbl_refs["read_host"] = read_host_lbl
+    read_lbl_refs["read_port"] = read_port_lbl
+
+    read_top = panel(ft.Column([
+        ft.Row([
+            ft.Column([read_host_lbl, tf_ocd_host], spacing=3, expand=True, tight=True),
+            ft.Column([read_port_lbl, tf_ocd_port], spacing=3, tight=True),
+        ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END),
+    ], spacing=4, tight=True))
+
+    read_left = panel(ft.Column([
+        ft.Container(
+            content=ft.Column([
+                read_result_col,
+                ft.Container(
+                    content=read_hint_text,
+                    visible=True,
+                    alignment=ft.alignment.center,
+                    expand=True,
+                ),
+            ], spacing=0),
+            bgcolor=LOG_BG,
+            border=ft.border.all(1, BORDER),
+            border_radius=6, padding=12, expand=True,
+        ),
+    ], expand=True, spacing=4), expand=True, width=280)
+
+    read_right = panel(ft.Column([
+        ft.Row([
+            ft.Text("Log", size=10, color=TEXT_DIM, font_family=FONT,
+                    weight=ft.FontWeight.W_600),
+            ft.Container(expand=True),
+            read_clear_btn,
+        ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+        ft.Container(
+            content=read_log_view, bgcolor=LOG_BG,
+            border=ft.border.all(1, BORDER),
+            border_radius=6, padding=8, expand=True,
+        ),
+    ], spacing=4, expand=True), expand=True)
+
+    read_tab_content = ft.Column([
+        ft.Container(
+            content=ft.Column([
+                read_top,
+                ft.Row([read_left, read_right], spacing=8, expand=True),
+            ], spacing=8, expand=True),
+            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            expand=True,
+        ),
+        ft.Container(
+            content=ft.Row([
+                ft.Container(expand=True),
+                read_spinner,
+                ft.Container(width=8),
+                read_btn,
+            ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            padding=ft.padding.only(left=10, right=10, bottom=6, top=0),
+        ),
+    ], spacing=0, expand=True)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB SWITCHER
+    # ══════════════════════════════════════════════════════════════════════════
+
+    tab_state   = {"current": "generate"}
+    tab_content = ft.Container(content=gen_tab_content, expand=True)
+
+    def tab_btn_style(active: bool):
+        return ft.ButtonStyle(
+            bgcolor={ft.ControlState.DEFAULT: ACCENT if active else "transparent"},
+            color={ft.ControlState.DEFAULT: TEXT if active else TEXT_DIM,
+                   ft.ControlState.HOVERED: TEXT},
+            shape=ft.RoundedRectangleBorder(radius=6),
+            text_style=ft.TextStyle(font_family=FONT, size=11,
+                                    weight=ft.FontWeight.W_600),
+            padding=ft.padding.symmetric(horizontal=14, vertical=5),
+        )
+
+    tab_gen_btn  = ft.FilledButton(text=T("tab_generate"), style=tab_btn_style(True))
+    tab_read_btn = ft.FilledButton(text=T("tab_read"),     style=tab_btn_style(False))
+
+    def switch_tab(name: str):
+        tab_state["current"] = name
+        tab_gen_btn.style   = tab_btn_style(name == "generate")
+        tab_read_btn.style  = tab_btn_style(name == "read")
+        tab_content.content = gen_tab_content if name == "generate" else read_tab_content
+        page.update()
+
+    tab_gen_btn.on_click  = lambda e: switch_tab("generate")
+    tab_read_btn.on_click = lambda e: switch_tab("read")
+
+    # ── language button ───────────────────────────────────────────────────────
+    lang_btn = ft.OutlinedButton(
+        text=T("lang_btn"),
+        style=ft.ButtonStyle(
+            color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
+            side=ft.BorderSide(1, BORDER),
+            shape=ft.RoundedRectangleBorder(radius=6),
+            text_style=ft.TextStyle(font_family=FONT, size=11, weight=ft.FontWeight.W_600),
+            padding=ft.padding.symmetric(horizontal=10, vertical=6),
+        ),
+    )
+
+    def refresh_lang():
+        for opts_key, ctrl in [("display_opts", sel_display),
+                                ("color_opts",   sel_color),
+                                ("region_opts",  sel_region)]:
+            ctrl.options = [ft.dropdown.Option(key=k, text=t) for k, t in T(opts_key)]
+        for key, txt in gen_lbl_refs.items():
+            txt.value = T(key)
+        for key, txt in read_lbl_refs.items():
+            txt.value = T(key)
+        gen_btn.text        = T("generate")
+        merge_btn.text      = T("merge")
+        merge_btn.tooltip   = T("tooltip_merge")
+        browse_btn.tooltip  = T("tooltip_browse")
+        gen_log_title.value = T("log")
+        gen_clear_btn.text  = T("clear")
+        read_btn.text       = T("read_btn")
+        read_clear_btn.text = T("read_clear")
+        read_hint_text.value = T("read_hint")
+        tab_gen_btn.text    = T("tab_generate")
+        tab_read_btn.text   = T("tab_read")
+        lang_btn.text       = T("lang_btn")
+        status_text.value   = T("ready")
+        status_dot.bgcolor  = ACCENT
+        page.update()
+
+    def toggle_lang(e):
+        lang_state["current"] = "en" if lang_state["current"] == "ru" else "ru"
+        refresh_lang()
+
+    lang_btn.on_click = toggle_lang
+
+    # ── root layout ───────────────────────────────────────────────────────────
+    page.add(ft.Column([
+        ft.Container(
+            content=ft.Row([
+                ft.Container(width=8, height=8, bgcolor=ACCENT, border_radius=4),
+                ft.Text("otptool", size=13, color=TEXT, font_family=FONT,
+                        weight=ft.FontWeight.W_700),
+                ft.Container(width=10),
+                ft.Container(
+                    content=ft.Row([tab_gen_btn, tab_read_btn], spacing=4),
+                    bgcolor=INPUT_BG,
+                    border=ft.border.all(1, BORDER),
+                    border_radius=8, padding=3,
+                ),
+                ft.Container(expand=True),
+                lang_btn,
+            ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=PANEL,
+            padding=ft.padding.symmetric(horizontal=14, vertical=8),
+            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
+        ),
+        tab_content,
+        ft.Container(
+            content=ft.Row([status_dot, status_text], spacing=6),
+            bgcolor=PANEL,
+            padding=ft.padding.symmetric(horizontal=14, vertical=5),
+            border=ft.border.only(top=ft.BorderSide(1, BORDER)),
+        ),
+    ], spacing=0, expand=True))
+
+    gen_log(T("started"))
+
+
+ft.app(target=main)
