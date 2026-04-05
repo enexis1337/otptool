@@ -349,7 +349,7 @@ def read_otp_from_device() -> bytes:
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
 
-def main(page: ft.Page):
+async def main(page: ft.Page):
     page.title            = "otptool"
     page.bgcolor          = BG
     page.window.width     = 640
@@ -375,7 +375,7 @@ def main(page: ft.Page):
             bgcolor=INPUT_BG, border_color=BORDER,
             focused_border_color=ACCENT, focused_bgcolor=INPUT_BG,
             border_radius=6, border_width=1, dense=True,
-            content_padding=ft.padding.symmetric(horizontal=8, vertical=8),
+            content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
             cursor_color=ACCENT,
         )
 
@@ -388,7 +388,7 @@ def main(page: ft.Page):
             bgcolor=INPUT_BG, border_color=BORDER,
             focused_border_color=ACCENT,
             border_radius=6, border_width=1, dense=True,
-            padding=ft.padding.symmetric(horizontal=8, vertical=8),
+            content_padding=ft.Padding.symmetric(horizontal=8, vertical=8),
         )
 
     gen_lbl_refs:  dict[str, ft.Text] = {}
@@ -407,7 +407,7 @@ def main(page: ft.Page):
     def panel(content, expand=False, width=None):
         return ft.Container(
             content=content, bgcolor=PANEL,
-            border=ft.border.all(1, BORDER), border_radius=10,
+            border=ft.Border.all(1, BORDER), border_radius=10,
             padding=12, expand=expand, width=width,
             shadow=ft.BoxShadow(blur_radius=8, spread_radius=0,
                                 color="#40000000", offset=ft.Offset(0, 2)),
@@ -422,7 +422,7 @@ def main(page: ft.Page):
             shape=ft.RoundedRectangleBorder(radius=8),
             text_style=ft.TextStyle(font_family=FONT, size=12,
                                     weight=ft.FontWeight.W_600),
-            padding=ft.padding.symmetric(horizontal=px, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=px, vertical=8),
         )
 
     # ── status bar ────────────────────────────────────────────────────────────
@@ -442,7 +442,7 @@ def main(page: ft.Page):
     tf_fw     = tf("7")
     tf_body   = tf("9")
     tf_conn   = tf("6")
-    tf_name   = tf("flipname", max_length=8)
+    tf_name   = tf("flipname")
     tf_ts     = tf("", hint="auto")
     tf_outdir = tf(os.path.expanduser("~"))
     tf_prefix = tf("otp")
@@ -512,25 +512,26 @@ def main(page: ft.Page):
         except Exception as ex:
             gen_log(f"{T('err_merge_ex')}{ex}", ERR); set_status("status_err", False)
 
-    def pick_outdir(e: ft.FilePickerResultEvent):
-        if e.path:
-            tf_outdir.value = e.path
-            page.update()
+    outdir_picker = ft.FilePicker()
+    page.services.append(outdir_picker)
 
-    outdir_picker = ft.FilePicker(on_result=pick_outdir)
-    page.overlay.append(outdir_picker)
+    async def do_browse(e):
+        path = await outdir_picker.get_directory_path()
+        if path:
+            tf_outdir.value = path
+            page.update()
 
     browse_btn = ft.IconButton(
         icon=ft.Icons.FOLDER_OPEN_OUTLINED,
         icon_color=TEXT_DIM, icon_size=15,
-        on_click=lambda e: outdir_picker.get_directory_path(),
-        style=ft.ButtonStyle(padding=ft.padding.all(2)),
+        on_click=do_browse,
+        style=ft.ButtonStyle(padding=ft.Padding.all(2)),
         tooltip=T("tooltip_browse"),
     )
 
-    gen_btn   = ft.FilledButton(text=T("generate"), on_click=do_generate,
+    gen_btn   = ft.FilledButton(content=T("generate"), on_click=do_generate,
                                 style=filled_style(ACCENT, ACCENT_H, "#2D55CC", 24))
-    merge_btn = ft.FilledButton(text=T("merge"),    on_click=do_merge,
+    merge_btn = ft.FilledButton(content=T("merge"),    on_click=do_merge,
                                 style=filled_style("#2A4A2A", "#3A6A3A", "#1E361E", 16),
                                 tooltip=T("tooltip_merge"))
 
@@ -541,7 +542,7 @@ def main(page: ft.Page):
         on_click=lambda e: [gen_log_view.controls.clear(), page.update()],
         style=ft.ButtonStyle(
             color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
-            padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            padding=ft.Padding.symmetric(horizontal=4, vertical=0),
             text_style=ft.TextStyle(size=10, font_family=FONT),
         ),
     )
@@ -570,7 +571,7 @@ def main(page: ft.Page):
                vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Container(
             content=gen_log_view, bgcolor=LOG_BG,
-            border=ft.border.all(1, BORDER),
+            border=ft.Border.all(1, BORDER),
             border_radius=6, padding=8, expand=True,
         ),
     ], spacing=4, expand=True), expand=True)
@@ -578,7 +579,7 @@ def main(page: ft.Page):
     gen_tab_content = ft.Column([
         ft.Container(
             content=ft.Row([gen_left, gen_right], spacing=8, expand=True),
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             expand=True,
         ),
         ft.Container(
@@ -586,7 +587,7 @@ def main(page: ft.Page):
                 ft.Container(expand=True), merge_btn,
                 ft.Container(width=6), gen_btn,
             ]),
-            padding=ft.padding.only(left=10, right=10, bottom=6, top=0),
+            padding=ft.Padding.only(left=10, right=10, bottom=6, top=0),
         ),
     ], spacing=0, expand=True)
 
@@ -618,7 +619,7 @@ def main(page: ft.Page):
         icon=ft.Icons.REFRESH,
         icon_color=TEXT_DIM, icon_size=15,
         on_click=refresh_dfu_status,
-        style=ft.ButtonStyle(padding=ft.padding.all(2)),
+        style=ft.ButtonStyle(padding=ft.Padding.all(2)),
         tooltip="Обновить",
     )
 
@@ -648,7 +649,7 @@ def main(page: ft.Page):
         def div():
             read_result_col.controls.append(
                 ft.Container(height=1, bgcolor=BORDER,
-                             margin=ft.margin.symmetric(vertical=2)))
+                             margin=ft.Margin.symmetric(vertical=2)))
 
         row("field_magic",   parsed["magic"])
         row("field_version", parsed["otp_ver"])
@@ -719,7 +720,7 @@ def main(page: ft.Page):
         page.update()
 
     read_btn = ft.FilledButton(
-        text=T("read_btn"),
+        content=T("read_btn"),
         on_click=do_read_otp,
         style=filled_style(ACCENT, ACCENT_H, "#2D55CC", 20),
     )
@@ -728,7 +729,7 @@ def main(page: ft.Page):
         on_click=do_read_clear,
         style=ft.ButtonStyle(
             color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
-            padding=ft.padding.symmetric(horizontal=4, vertical=0),
+            padding=ft.Padding.symmetric(horizontal=4, vertical=0),
             text_style=ft.TextStyle(size=10, font_family=FONT),
         ),
     )
@@ -752,12 +753,12 @@ def main(page: ft.Page):
                 ft.Container(
                     content=read_hint_text,
                     visible=True,
-                    alignment=ft.alignment.center,
+                    alignment=ft.Alignment.CENTER,
                     expand=True,
                 ),
             ], spacing=0),
             bgcolor=LOG_BG,
-            border=ft.border.all(1, BORDER),
+            border=ft.Border.all(1, BORDER),
             border_radius=6, padding=12, expand=True,
         ),
     ], expand=True, spacing=4), expand=True, width=280)
@@ -771,7 +772,7 @@ def main(page: ft.Page):
         ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ft.Container(
             content=read_log_view, bgcolor=LOG_BG,
-            border=ft.border.all(1, BORDER),
+            border=ft.Border.all(1, BORDER),
             border_radius=6, padding=8, expand=True,
         ),
     ], spacing=4, expand=True), expand=True)
@@ -782,7 +783,7 @@ def main(page: ft.Page):
                 read_top,
                 ft.Row([read_left, read_right], spacing=8, expand=True),
             ], spacing=8, expand=True),
-            padding=ft.padding.symmetric(horizontal=10, vertical=8),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=8),
             expand=True,
         ),
         ft.Container(
@@ -792,7 +793,7 @@ def main(page: ft.Page):
                 ft.Container(width=8),
                 read_btn,
             ], vertical_alignment=ft.CrossAxisAlignment.CENTER),
-            padding=ft.padding.only(left=10, right=10, bottom=6, top=0),
+            padding=ft.Padding.only(left=10, right=10, bottom=6, top=0),
         ),
     ], spacing=0, expand=True)
 
@@ -811,11 +812,11 @@ def main(page: ft.Page):
             shape=ft.RoundedRectangleBorder(radius=6),
             text_style=ft.TextStyle(font_family=FONT, size=11,
                                     weight=ft.FontWeight.W_600),
-            padding=ft.padding.symmetric(horizontal=14, vertical=5),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=5),
         )
 
-    tab_gen_btn  = ft.FilledButton(text=T("tab_generate"), style=tab_btn_style(True))
-    tab_read_btn = ft.FilledButton(text=T("tab_read"),     style=tab_btn_style(False))
+    tab_gen_btn  = ft.FilledButton(content=T("tab_generate"), style=tab_btn_style(True))
+    tab_read_btn = ft.FilledButton(content=T("tab_read"),     style=tab_btn_style(False))
 
     def switch_tab(name: str):
         tab_state["current"] = name
@@ -829,13 +830,13 @@ def main(page: ft.Page):
 
     # ── language button ───────────────────────────────────────────────────────
     lang_btn = ft.OutlinedButton(
-        text=T("lang_btn"),
+        content=T("lang_btn"),
         style=ft.ButtonStyle(
             color={ft.ControlState.DEFAULT: TEXT_DIM, ft.ControlState.HOVERED: ACCENT},
             side=ft.BorderSide(1, BORDER),
             shape=ft.RoundedRectangleBorder(radius=6),
             text_style=ft.TextStyle(font_family=FONT, size=11, weight=ft.FontWeight.W_600),
-            padding=ft.padding.symmetric(horizontal=10, vertical=6),
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
         ),
     )
 
@@ -848,16 +849,16 @@ def main(page: ft.Page):
             txt.value = T(key)
         for key, txt in read_lbl_refs.items():
             txt.value = T(key)
-        gen_btn.text        = T("generate")
-        merge_btn.text      = T("merge")
+        gen_btn.content        = T("generate")
+        merge_btn.content      = T("merge")
         merge_btn.tooltip   = T("tooltip_merge")
         browse_btn.tooltip  = T("tooltip_browse")
         gen_log_title.value = T("log")
-        gen_clear_btn.text  = T("clear")
-        read_btn.text       = T("read_btn")
-        read_clear_btn.text = T("read_clear")
-        read_btn.text       = T("read_btn")
-        read_clear_btn.text = T("read_clear")
+        gen_clear_btn.content  = T("clear")
+        read_btn.content       = T("read_btn")
+        read_clear_btn.content = T("read_clear")
+        read_btn.content       = T("read_btn")
+        read_clear_btn.content = T("read_clear")
         read_hint_text.value = T("read_hint")
         status_text.value   = T("ready")
         status_dot.bgcolor  = ACCENT
@@ -880,26 +881,26 @@ def main(page: ft.Page):
                 ft.Container(
                     content=ft.Row([tab_gen_btn, tab_read_btn], spacing=4),
                     bgcolor=INPUT_BG,
-                    border=ft.border.all(1, BORDER),
+                    border=ft.Border.all(1, BORDER),
                     border_radius=8, padding=3,
                 ),
                 ft.Container(expand=True),
                 lang_btn,
             ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             bgcolor=PANEL,
-            padding=ft.padding.symmetric(horizontal=14, vertical=8),
-            border=ft.border.only(bottom=ft.BorderSide(1, BORDER)),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=8),
+            border=ft.Border.only(bottom=ft.BorderSide(1, BORDER)),
         ),
         tab_content,
         ft.Container(
             content=ft.Row([status_dot, status_text], spacing=6),
             bgcolor=PANEL,
-            padding=ft.padding.symmetric(horizontal=14, vertical=5),
-            border=ft.border.only(top=ft.BorderSide(1, BORDER)),
+            padding=ft.Padding.symmetric(horizontal=14, vertical=5),
+            border=ft.Border.only(top=ft.BorderSide(1, BORDER)),
         ),
     ], spacing=0, expand=True))
 
     gen_log(T("started"))
 
 
-ft.app(target=main)
+ft.run(main)
