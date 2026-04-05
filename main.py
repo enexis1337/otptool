@@ -4,7 +4,13 @@ Flipper Zero — OTP Generator / Reader  (Flet desktop GUI)
 pip install flet
 """
 
-import os, re, struct, datetime, socket, threading
+import os, re, struct, datetime, threading
+import usb.core, usb.util
+try:
+    import libusb_package
+    libusb_package.get_libusb1_backend()   # register backend
+except ImportError:
+    pass
 import flet as ft
 
 OTP_MAGIC    = 0xBABE
@@ -73,7 +79,7 @@ LANGS = {
         "read_serial":    "Серийный номер (необяз.)",
         "read_btn":       "Прочитать OTP",
         "read_clear":     "Очистить",
-        "read_hint":      "Подключите Flipper Zero и запустите OpenOCD, затем нажмите «Прочитать OTP»",
+        "read_hint":      "Переведите Flipper Zero в DFU режим (удерживайте Back+Left при включении), затем нажмите «Прочитать OTP»",
         "read_connecting":"Подключение к OpenOCD...",
         "read_reading":   "Чтение OTP из памяти...",
         "read_ok":        "OTP прочитан успешно",
@@ -127,7 +133,7 @@ LANGS = {
         "read_serial":    "Serial number (optional)",
         "read_btn":       "Read OTP",
         "read_clear":     "Clear",
-        "read_hint":      "Connect Flipper Zero and start OpenOCD, then press «Read OTP»",
+        "read_hint":      "Put Flipper Zero into DFU mode (hold Back+Left on boot), then press «Read OTP»",
         "read_connecting":"Connecting to OpenOCD...",
         "read_reading":   "Reading OTP from memory...",
         "read_ok":        "OTP read successfully",
@@ -212,87 +218,133 @@ def parse_otp(data: bytes) -> dict:
     return result
 
 
-# ── OpenOCD TCL RPC ───────────────────────────────────────────────────────────
+# ── DFU OTP reader ────────────────────────────────────────────────────────────
+#
+# STM32WB55 DFU: VID=0x0483, PID=0xDF11
+# OTP area: 0x1FFF7000, 32 bytes
+#
+# STM32 DFU state machine for reading arbitrary memory:
+#   1. DFU_DNLOAD wBlockNum=0, data=[0x21, addr_lo, addr_hi, addr_hi2, addr_hi3]
+#      → device enters dfuDNBUSY, then dfuDNLOAD-IDLE
+#   2. DFU_GETSTATUS (triggers execution of Set Address command)
+#   3. DFU_UPLOAD wBlockNum=2, length=N  (block 2 = address_pointer + 0)
+#      → returns N bytes from the set address
 
-class OpenOCDTCL:
+DFU_VID = 0x0483
+DFU_PID = 0xDF11
+
+# DFU requests
+_DFU_DNLOAD    = 0x01
+_DFU_UPLOAD    = 0x02
+_DFU_GETSTATUS = 0x03
+_DFU_CLRSTATUS = 0x04
+_DFU_ABORT     = 0x06
+
+_RT_OUT = 0x21   # bmRequestType: class | interface | host→device
+_RT_IN  = 0xA1   # bmRequestType: class | interface | device→host
+
+# DFU states
+_ST_IDLE        = 2
+_ST_DNLOAD_IDLE = 5
+_ST_UPLOAD_IDLE = 9
+_ST_ERROR       = 10
+
+
+def _get_backend():
+    try:
+        import libusb_package
+        return libusb_package.get_libusb1_backend()
+    except ImportError:
+        return None
+
+
+def _dfu_get_status(dev, intf_num: int = 0) -> tuple:
+    """Returns (bStatus, bState)."""
+    resp = dev.ctrl_transfer(_RT_IN, _DFU_GETSTATUS, 0, intf_num, 6)
+    return int(resp[0]), int(resp[4])
+
+
+def _dfu_clr_status(dev, intf_num: int = 0):
+    dev.ctrl_transfer(_RT_OUT, _DFU_CLRSTATUS, 0, intf_num, None)
+
+
+def _dfu_abort(dev, intf_num: int = 0):
+    dev.ctrl_transfer(_RT_OUT, _DFU_ABORT, 0, intf_num, None)
+
+
+def _dfu_wait(dev, intf_num: int, target_states: tuple, retries: int = 200):
+    """Poll GetStatus until one of target_states is reached."""
+    import time
+    for _ in range(retries):
+        status, state = _dfu_get_status(dev, intf_num)
+        if status != 0:
+            raise RuntimeError(f"DFU status error 0x{status:02X} in state {state}")
+        if state in target_states:
+            return state
+        time.sleep(0.02)
+    raise RuntimeError(f"DFU timeout waiting for states {target_states}, last state={state}")
+
+
+def find_dfu_device():
+    """Return usb.core.Device for Flipper Zero in DFU mode, or None."""
+    try:
+        return usb.core.find(idVendor=DFU_VID, idProduct=DFU_PID, backend=_get_backend())
+    except usb.core.NoBackendError:
+        raise RuntimeError("no_backend")
+
+
+def read_otp_from_device() -> bytes:
     """
-    Minimal client for OpenOCD TCL RPC interface (default port 6666).
-    Sends a TCL command, reads response terminated by 0x1A.
+    Read 32 bytes of OTP (0x1FFF7000) from STM32WB55 via USB DFU.
+    Flipper Zero must be in DFU mode (hold Back+Left on boot).
+    On Windows: install WinUSB driver via Zadig for 'STM32 BOOTLOADER'.
     """
-    TOKEN = b"\x1a"
+    dev = find_dfu_device()
+    if dev is None:
+        raise RuntimeError("no_device")
 
-    def __init__(self, host: str = "localhost", port: int = 6666, timeout: float = 5.0):
-        self.host    = host
-        self.port    = port
-        self.timeout = timeout
-        self._sock   = None
-
-    def connect(self):
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(self.timeout)
-        self._sock.connect((self.host, self.port))
-
-    def close(self):
-        if self._sock:
-            try: self._sock.close()
-            except: pass
-            self._sock = None
-
-    def cmd(self, command: str) -> str:
-        """Send a TCL command and return the response string."""
-        self._sock.sendall((command + "\x1a").encode())
-        buf = b""
-        while True:
-            chunk = self._sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-            if self.TOKEN in buf:
-                break
-        return buf.rstrip(self.TOKEN).decode(errors="replace").strip()
-
-    def read_memory(self, address: int, count: int) -> bytes:
-        """
-        Read `count` bytes from memory via 'read_memory addr 8 count'.
-        OpenOCD returns a Tcl list of decimal byte values.
-        """
-        resp = self.cmd(f"read_memory 0x{address:08X} 8 {count}")
-        # resp is a space-separated list of decimal integers
-        parts = resp.split()
-        if len(parts) < count:
-            raise RuntimeError(f"Expected {count} bytes, got {len(parts)}: {resp!r}")
-        return bytes(int(p) for p in parts[:count])
-
-    def halt(self):
-        self.cmd("halt")
-
-    def resume(self):
-        self.cmd("resume")
-
-    def init_target(self, interface: str, serial: str = ""):
-        """
-        Re-initialize target with given interface config.
-        Only needed if OpenOCD is already running with a different config.
-        In typical use the user starts OpenOCD manually so we skip this.
-        """
+    # Windows: detach_kernel_driver not supported, skip silently
+    try:
+        if dev.is_kernel_driver_active(0):
+            dev.detach_kernel_driver(0)
+    except (NotImplementedError, usb.core.USBError):
         pass
 
+    dev.set_configuration()
+    cfg      = dev.get_active_configuration()
+    intf_num = cfg[(0, 0)].bInterfaceNumber
+    usb.util.claim_interface(dev, intf_num)
 
-def read_otp_from_device(host: str, port: int) -> bytes:
-    """
-    Connect to OpenOCD TCL RPC, halt target, read 32 bytes of OTP, resume.
-    Returns raw 32-byte OTP data.
-    """
-    ocd = OpenOCDTCL(host=host, port=port, timeout=8.0)
-    ocd.connect()
     try:
-        ocd.halt()
-        first  = ocd.read_memory(OTP_ADDR_FIRST,  16)
-        second = ocd.read_memory(OTP_ADDR_SECOND, 16)
-        ocd.resume()
-        return first + second
+        # recover from error state if needed
+        status, state = _dfu_get_status(dev, intf_num)
+        if state == _ST_ERROR:
+            _dfu_clr_status(dev, intf_num)
+            state = _ST_IDLE
+        if state not in (_ST_IDLE, _ST_DNLOAD_IDLE, _ST_UPLOAD_IDLE):
+            _dfu_abort(dev, intf_num)
+            _dfu_wait(dev, intf_num, (_ST_IDLE,))
+
+        # Step 1: Set Address Pointer via DFU_DNLOAD wBlockNum=0
+        cmd = struct.pack("<BI", 0x21, OTP_ADDR_FIRST)
+        dev.ctrl_transfer(_RT_OUT, _DFU_DNLOAD, 0, intf_num, cmd)
+
+        # Step 2: GetStatus triggers execution; device goes dfuDNBUSY → dfuDNLOAD-IDLE
+        _dfu_wait(dev, intf_num, (_ST_DNLOAD_IDLE,))
+
+        # Step 3: DFU_UPLOAD wBlockNum=2 reads from address_pointer + 0
+        # (STM32 DFU: block 0 = special cmds, block 1 = addr-transfer_size, block 2 = addr+0)
+        data = dev.ctrl_transfer(_RT_IN, _DFU_UPLOAD, 2, intf_num, 32)
+
+        _dfu_abort(dev, intf_num)
+
     finally:
-        ocd.close()
+        usb.util.release_interface(dev, intf_num)
+        usb.util.dispose_resources(dev)
+
+    if len(data) < 16:
+        raise ValueError("bad_data")
+    return bytes(data[:32])
 
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
@@ -390,7 +442,7 @@ def main(page: ft.Page):
     tf_fw     = tf("7")
     tf_body   = tf("9")
     tf_conn   = tf("6")
-    tf_name   = tf("Flipper1", max_length=8)
+    tf_name   = tf("flipname", max_length=8)
     tf_ts     = tf("", hint="auto")
     tf_outdir = tf(os.path.expanduser("~"))
     tf_prefix = tf("otp")
@@ -403,7 +455,7 @@ def main(page: ft.Page):
 
     def gen_log(msg: str, color=LOG_FG):
         gen_log_view.controls.append(
-            ft.Text(msg, size=11, color=color, font_family=FONT, selectable=True))
+            ft.Text(msg, size=11, color=color, font_family="Courier New", selectable=True))
         page.update()
 
     def do_generate(e):
@@ -539,12 +591,36 @@ def main(page: ft.Page):
     ], spacing=0, expand=True)
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 2 — READ  (OpenOCD TCL RPC)
+    # TAB 2 — READ  (USB DFU / pyusb)
     # ══════════════════════════════════════════════════════════════════════════
 
-    tf_ocd_host   = tf("localhost", expand=True)
-    tf_ocd_port   = tf("6666", expand=False)
-    tf_ocd_port.width = 72
+    # DFU device status indicator
+    dfu_status_text = ft.Text(
+        "Устройство не найдено", size=11, color=TEXT_DIM,
+        font_family="Courier New",
+    )
+
+    def refresh_dfu_status(e=None):
+        try:
+            dev = find_dfu_device()
+            found = dev is not None
+        except RuntimeError:
+            found = False
+        if found:
+            dfu_status_text.value = f"Flipper Zero DFU  [VID={DFU_VID:04X} PID={DFU_PID:04X}]"
+            dfu_status_text.color = OK_C
+        else:
+            dfu_status_text.value = "Устройство не найдено"
+            dfu_status_text.color = TEXT_DIM
+        page.update()
+
+    refresh_dfu_btn = ft.IconButton(
+        icon=ft.Icons.REFRESH,
+        icon_color=TEXT_DIM, icon_size=15,
+        on_click=refresh_dfu_status,
+        style=ft.ButtonStyle(padding=ft.padding.all(2)),
+        tooltip="Обновить",
+    )
 
     read_result_col = ft.Column([], spacing=5, scroll=ft.ScrollMode.AUTO)
 
@@ -566,7 +642,7 @@ def main(page: ft.Page):
                 ft.Text(L[field_key], size=11, color=TEXT_DIM,
                         font_family=FONT, width=110),
                 ft.Text(str(value), size=11, color=val_color,
-                        font_family=FONT, selectable=True, expand=True),
+                        font_family="Courier New", selectable=True, expand=True),
             ], spacing=8))
 
         def div():
@@ -595,7 +671,7 @@ def main(page: ft.Page):
 
     def read_log(msg: str, color=LOG_FG):
         read_log_view.controls.append(
-            ft.Text(msg, size=11, color=color, font_family=FONT, selectable=True))
+            ft.Text(msg, size=11, color=color, font_family="Courier New", selectable=True))
         page.update()
 
     def set_read_busy(busy: bool):
@@ -604,27 +680,23 @@ def main(page: ft.Page):
         page.update()
 
     def do_read_otp(e):
-        host = tf_ocd_host.value.strip() or "localhost"
-        try:
-            port = int(tf_ocd_port.value.strip())
-        except ValueError:
-            read_log("ERROR: invalid port", ERR); return
-
         def worker():
             set_read_busy(True)
-            read_log(T("read_connecting"), LOG_FG)
+            read_log("Поиск Flipper Zero в DFU режиме...", LOG_FG)
             try:
-                raw = read_otp_from_device(host, port)
+                raw = read_otp_from_device()
                 read_log(T("read_reading"), LOG_FG)
                 parsed = parse_otp(raw)
                 render_parse_result(parsed)
                 read_log(f"✓  {T('read_ok')}  [{len(raw)}B]", OK_C)
                 set_status("read_ok")
-            except ConnectionRefusedError:
-                read_log(f"✗  {T('read_conn_err')} ({host}:{port})", ERR)
-                set_status("read_err", False)
-            except OSError as ex:
-                read_log(f"✗  {T('read_conn_err')}: {ex}", ERR)
+            except RuntimeError as ex:
+                if "no_device" in str(ex):
+                    read_log("✗  Flipper Zero в DFU режиме не найден", ERR)
+                elif "no_backend" in str(ex):
+                    read_log("✗  libusb не найден. Установите: pip install libusb-package", ERR)
+                else:
+                    read_log(f"✗  {ex}", ERR)
                 set_status("read_err", False)
             except ValueError as ve:
                 key = f"read_{ve}"
@@ -636,6 +708,7 @@ def main(page: ft.Page):
                 set_status("read_err", False)
             finally:
                 set_read_busy(False)
+                refresh_dfu_status()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -660,17 +733,15 @@ def main(page: ft.Page):
         ),
     )
 
-    read_host_lbl = ft.Text(T("read_host"), size=10, color=TEXT_DIM,
+    read_port_lbl = ft.Text("DFU Device", size=10, color=TEXT_DIM,
                              font_family=FONT, weight=ft.FontWeight.W_500)
-    read_port_lbl = ft.Text(T("read_port"), size=10, color=TEXT_DIM,
-                             font_family=FONT, weight=ft.FontWeight.W_500)
-    read_lbl_refs["read_host"] = read_host_lbl
-    read_lbl_refs["read_port"] = read_port_lbl
 
     read_top = panel(ft.Column([
         ft.Row([
-            ft.Column([read_host_lbl, tf_ocd_host], spacing=3, expand=True, tight=True),
-            ft.Column([read_port_lbl, tf_ocd_port], spacing=3, tight=True),
+            ft.Column([read_port_lbl,
+                       ft.Row([dfu_status_text, ft.Container(expand=True), refresh_dfu_btn],
+                               vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+                      spacing=3, expand=True, tight=True),
         ], spacing=8, vertical_alignment=ft.CrossAxisAlignment.END),
     ], spacing=4, tight=True))
 
@@ -785,10 +856,9 @@ def main(page: ft.Page):
         gen_clear_btn.text  = T("clear")
         read_btn.text       = T("read_btn")
         read_clear_btn.text = T("read_clear")
+        read_btn.text       = T("read_btn")
+        read_clear_btn.text = T("read_clear")
         read_hint_text.value = T("read_hint")
-        tab_gen_btn.text    = T("tab_generate")
-        tab_read_btn.text   = T("tab_read")
-        lang_btn.text       = T("lang_btn")
         status_text.value   = T("ready")
         status_dot.bgcolor  = ACCENT
         page.update()
