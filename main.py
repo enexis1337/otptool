@@ -46,7 +46,7 @@ FONT     = "Segoe UI"
 
 LANGS = {
     "ru": {
-        "tab_generate": "Generate", "tab_read": "Read",
+        "tab_generate": "Генерация", "tab_read": "Чтение",
         "ver": "Версия", "fw": "ПО", "body": "Корпус", "conn": "Разъём",
         "display": "Дисплей", "color": "Цвет", "region": "Регион",
         "name": "Имя", "outdir": "Папка вывода", "prefix": "Префикс",
@@ -73,20 +73,19 @@ LANGS = {
                          ("us_ca_au","US/CA/AU"),("jp","Япония"),("world","Мир")],
         "display_opts": [("unknown","Неизвестно"),("erc","ERC"),("mgg","MGG")],
         # read tab
-        "read_host":      "Хост OpenOCD",
-        "read_port":      "TCL порт",
-        "read_iface":     "Интерфейс",
-        "read_serial":    "Серийный номер (необяз.)",
         "read_btn":       "Прочитать OTP",
         "read_clear":     "Очистить",
         "read_hint":      "Переведите Flipper Zero в DFU режим (удерживайте Back+Left при включении), затем нажмите «Прочитать OTP»",
-        "read_connecting":"Подключение к OpenOCD...",
+        "read_searching": "Поиск Flipper Zero в DFU режиме...",
         "read_reading":   "Чтение OTP из памяти...",
         "read_ok":        "OTP прочитан успешно",
         "read_err":       "Ошибка чтения",
-        "read_conn_err":  "Нет соединения с OpenOCD",
+        "read_no_device": "Flipper Zero в DFU режиме не найден",
+        "read_no_backend":"libusb не найден. Установите: pip install libusb-package",
         "read_bad_magic": "ОШИБКА: неверный Magic (ожидается 0xBABE)",
         "read_bad_data":  "ОШИБКА: некорректные данные OTP",
+        "dfu_device_lbl": "DFU устройство",
+        "dfu_not_found":  "Устройство не найдено",
         "field_magic":    "Magic",
         "field_version":  "OTP Version",
         "field_ts":       "Timestamp",
@@ -111,7 +110,7 @@ LANGS = {
         "status_ok": "Generated OK", "status_merged": "Files merged",
         "status_err": "Error", "status_inv": "Invalid input",
         "status_name": "Invalid name",
-        "started": "otptool is started!",
+        "started": "otptool started!",
         "err_int":      "ERROR: numeric fields must be integers",
         "err_name":     "ERROR: Name must be [a-zA-Z0-9.], 1-8 chars",
         "err_ts":       "ERROR: Timestamp must be an integer",
@@ -127,20 +126,19 @@ LANGS = {
                          ("us_ca_au","US/CA/AU"),("jp","Japan"),("world","World")],
         "display_opts": [("unknown","Unknown"),("erc","ERC"),("mgg","MGG")],
         # read tab
-        "read_host":      "OpenOCD Host",
-        "read_port":      "TCL Port",
-        "read_iface":     "Interface",
-        "read_serial":    "Serial number (optional)",
         "read_btn":       "Read OTP",
         "read_clear":     "Clear",
         "read_hint":      "Put Flipper Zero into DFU mode (hold Back+Left on boot), then press «Read OTP»",
-        "read_connecting":"Connecting to OpenOCD...",
+        "read_searching": "Searching for Flipper Zero in DFU mode...",
         "read_reading":   "Reading OTP from memory...",
         "read_ok":        "OTP read successfully",
         "read_err":       "Read error",
-        "read_conn_err":  "Cannot connect to OpenOCD",
+        "read_no_device": "Flipper Zero in DFU mode not found",
+        "read_no_backend":"libusb not found. Install: pip install libusb-package",
         "read_bad_magic": "ERROR: invalid Magic (expected 0xBABE)",
         "read_bad_data":  "ERROR: invalid OTP data",
+        "dfu_device_lbl": "DFU Device",
+        "dfu_not_found":  "Device not found",
         "field_magic":    "Magic",
         "field_version":  "OTP Version",
         "field_ts":       "Timestamp",
@@ -186,68 +184,68 @@ def merge_bins(path1: str, path2: str, out_path: str) -> int:
     return len(data)
 
 def parse_otp(data: bytes) -> dict:
-    """Parse 32-byte combined OTP dump."""
-    if len(data) < 16:
+    """Parse OTP dump (at least 32 bytes). Layout matches STM32WB55 Flipper OTP."""
+    if len(data) < 32:
         raise ValueError("bad_data")
 
-    first = data[:16]
-    magic, otp_ver, _, ts, ver, fw, body, conn, display_raw, _, _ = struct.unpack(
-        "<HBBLBBBBBBH", first
-    )
+    magic, otp_ver   = struct.unpack_from("<HH", data, 0)
+    ts               = struct.unpack_from("<I",  data, 4)[0]
+    ver              = data[8]
+    fw               = data[9]
+    body             = data[10]
+    conn             = data[11]
+    display_raw      = struct.unpack_from("<I",  data, 12)[0]
+    color_raw        = data[16]
+    region_raw       = data[17]
+    name_raw         = data[24:32]
+
     if magic != OTP_MAGIC:
         raise ValueError("bad_magic")
 
     ts_human = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "—"
-    display  = DISPLAYS_R.get(display_raw, f"0x{display_raw:02X}")
+    name     = name_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
 
-    result = {
-        "magic": f"0x{magic:04X}", "otp_ver": otp_ver,
-        "ts_raw": ts, "ts_human": ts_human,
-        "ver": ver, "fw": fw, "body": body, "conn": conn, "display": display,
+    return {
+        "magic":    f"0x{magic:04X}",
+        "otp_ver":  otp_ver,
+        "ts_raw":   ts,
+        "ts_human": ts_human,
+        "ver":      ver,
+        "fw":       fw,
+        "body":     body,
+        "conn":     conn,
+        "display":  DISPLAYS_R.get(display_raw, f"unknown({display_raw})"),
+        "color":    COLORS_R.get(color_raw,     f"unknown({color_raw})"),
+        "region":   REGIONS_R.get(region_raw,   f"unknown({region_raw})"),
+        "name":     name,
     }
 
-    if len(data) >= 32:
-        second = data[16:32]
-        color_raw, region_raw, _, _, name_raw = struct.unpack("<BBHL8s", second)
-        result.update({
-            "color":  COLORS_R.get(color_raw,   f"0x{color_raw:02X}"),
-            "region": REGIONS_R.get(region_raw, f"0x{region_raw:02X}"),
-            "name":   name_raw.rstrip(b"\x00").decode("ascii", errors="replace"),
-        })
 
-    return result
+# ── DFU OTP reader (based on dumper-otp-main logic) ──────────────────────────
 
+import time as _time
 
-# ── DFU OTP reader ────────────────────────────────────────────────────────────
-#
-# STM32WB55 DFU: VID=0x0483, PID=0xDF11
-# OTP area: 0x1FFF7000, 32 bytes
-#
-# STM32 DFU state machine for reading arbitrary memory:
-#   1. DFU_DNLOAD wBlockNum=0, data=[0x21, addr_lo, addr_hi, addr_hi2, addr_hi3]
-#      → device enters dfuDNBUSY, then dfuDNLOAD-IDLE
-#   2. DFU_GETSTATUS (triggers execution of Set Address command)
-#   3. DFU_UPLOAD wBlockNum=2, length=N  (block 2 = address_pointer + 0)
-#      → returns N bytes from the set address
+_DFU_CLASS    = 0xFE
+_DFU_SUBCLASS = 0x01
+_DFU_PROTOCOL = 0x02
 
-DFU_VID = 0x0483
-DFU_PID = 0xDF11
+_REQ_DNLOAD    = 0x01
+_REQ_UPLOAD    = 0x02
+_REQ_GETSTATUS = 0x03
+_REQ_CLRSTATUS = 0x04
+_REQ_GETSTATE  = 0x05
+_REQ_ABORT     = 0x06
 
-# DFU requests
-_DFU_DNLOAD    = 0x01
-_DFU_UPLOAD    = 0x02
-_DFU_GETSTATUS = 0x03
-_DFU_CLRSTATUS = 0x04
-_DFU_ABORT     = 0x06
+_CMD_SET_ADDRESS = 0x21
 
-_RT_OUT = 0x21   # bmRequestType: class | interface | host→device
-_RT_IN  = 0xA1   # bmRequestType: class | interface | device→host
+_ST_IDLE        = 0x02
+_ST_DNLOAD_SYNC = 0x03
+_ST_DNBUSY      = 0x04
+_ST_DNLOAD_IDLE = 0x05
+_ST_UPLOAD_IDLE = 0x09
+_ST_ERROR       = 0x0A
 
-# DFU states
-_ST_IDLE        = 2
-_ST_DNLOAD_IDLE = 5
-_ST_UPLOAD_IDLE = 9
-_ST_ERROR       = 10
+_TRANSFER_SIZE  = 2048
 
 
 def _get_backend():
@@ -258,39 +256,154 @@ def _get_backend():
         return None
 
 
-def _dfu_get_status(dev, intf_num: int = 0) -> tuple:
-    """Returns (bStatus, bState)."""
-    resp = dev.ctrl_transfer(_RT_IN, _DFU_GETSTATUS, 0, intf_num, 6)
-    return int(resp[0]), int(resp[4])
+def _iter_dfu_interfaces():
+    """Yield dicts describing every DFU interface on every connected device."""
+    backend = _get_backend()
+    try:
+        devices = list(usb.core.find(find_all=True, backend=backend))
+    except usb.core.NoBackendError:
+        raise RuntimeError("no_backend")
 
-
-def _dfu_clr_status(dev, intf_num: int = 0):
-    dev.ctrl_transfer(_RT_OUT, _DFU_CLRSTATUS, 0, intf_num, None)
-
-
-def _dfu_abort(dev, intf_num: int = 0):
-    dev.ctrl_transfer(_RT_OUT, _DFU_ABORT, 0, intf_num, None)
-
-
-def _dfu_wait(dev, intf_num: int, target_states: tuple, retries: int = 200):
-    """Poll GetStatus until one of target_states is reached."""
-    import time
-    for _ in range(retries):
-        status, state = _dfu_get_status(dev, intf_num)
-        if status != 0:
-            raise RuntimeError(f"DFU status error 0x{status:02X} in state {state}")
-        if state in target_states:
-            return state
-        time.sleep(0.02)
-    raise RuntimeError(f"DFU timeout waiting for states {target_states}, last state={state}")
+    result = []
+    for dev in devices:
+        for cfg in dev:
+            for intf in cfg:
+                if (intf.bInterfaceClass    == _DFU_CLASS and
+                    intf.bInterfaceSubClass == _DFU_SUBCLASS and
+                    intf.bInterfaceProtocol == _DFU_PROTOCOL):
+                    result.append({
+                        "dev": dev,
+                        "cfg": cfg.bConfigurationValue,
+                        "intf": intf.bInterfaceNumber,
+                        "alt":  intf.bAlternateSetting,
+                    })
+    return result
 
 
 def find_dfu_device():
-    """Return usb.core.Device for Flipper Zero in DFU mode, or None."""
-    try:
-        return usb.core.find(idVendor=DFU_VID, idProduct=DFU_PID, backend=_get_backend())
-    except usb.core.NoBackendError:
-        raise RuntimeError("no_backend")
+    """Return first DFU interface info dict, or None."""
+    devs = _iter_dfu_interfaces()
+    return devs[0] if devs else None
+
+
+class _Stm32Dfu:
+    def __init__(self, info):
+        self.dev  = info["dev"]
+        self.info = info
+
+    def _out(self, req, value, data=b""):
+        try:
+            self.dev.ctrl_transfer(0x21, req, value, self.info["intf"], data, 1000)
+        except usb.core.USBError as e:
+            raise RuntimeError(f"USB OUT 0x{req:02X} failed: {e}") from e
+
+    def _in(self, req, value, length):
+        try:
+            return bytes(self.dev.ctrl_transfer(0xA1, req, value, self.info["intf"], length, 1000))
+        except usb.core.USBError as e:
+            raise RuntimeError(f"USB IN 0x{req:02X} failed: {e}") from e
+
+    def get_state(self):
+        return self._in(_REQ_GETSTATE, 0, 1)[0]
+
+    def get_status(self):
+        raw = self._in(_REQ_GETSTATUS, 0, 6)
+        status      = raw[0]
+        poll_ms     = raw[1] | (raw[2] << 8) | (raw[3] << 16)
+        state       = raw[4]
+        return status, poll_ms, state
+
+    def clear_status(self):
+        self._out(_REQ_CLRSTATUS, 0)
+
+    def abort(self):
+        self._out(_REQ_ABORT, 0)
+
+    def ensure_idle(self):
+        state = self.get_state()
+        if state == _ST_IDLE:
+            return
+        if state == _ST_ERROR:
+            self.clear_status()
+            state = self.get_state()
+        if state in (_ST_DNLOAD_IDLE, _ST_UPLOAD_IDLE):
+            self.abort()
+            state = self.get_state()
+        if state != _ST_IDLE:
+            raise RuntimeError(f"DFU not idle, state=0x{state:02X}")
+
+    def wait_ready(self):
+        for _ in range(200):
+            status, poll_ms, state = self.get_status()
+            if poll_ms:
+                _time.sleep(poll_ms / 1000.0)
+            if status != 0:
+                raise RuntimeError(f"DFU status error 0x{status:02X} state=0x{state:02X}")
+            if state not in (_ST_DNBUSY, _ST_DNLOAD_SYNC):
+                return state
+        raise RuntimeError("DFU device busy timeout")
+
+    def set_address(self, address: int):
+        self.ensure_idle()
+        payload = bytes([_CMD_SET_ADDRESS]) + address.to_bytes(4, "little")
+        self._out(_REQ_DNLOAD, 0, payload)
+        state = self.wait_ready()
+        if state != _ST_DNLOAD_IDLE:
+            raise RuntimeError(f"unexpected state after set_address: 0x{state:02X}")
+        self.abort()
+        self.ensure_idle()
+
+    def upload_block(self, block_num: int, length: int) -> bytes:
+        data = self._in(_REQ_UPLOAD, block_num, length)
+        _, _, state = self.get_status()
+        if state not in (_ST_UPLOAD_IDLE, _ST_IDLE):
+            self.wait_ready()
+        return data
+
+    def read_memory(self, address: int, size: int) -> bytes:
+        self.set_address(address)
+        out = bytearray()
+        block_num = 2
+        left = size
+        while left > 0:
+            chunk = min(left, _TRANSFER_SIZE)
+            part  = self.upload_block(block_num, chunk)
+            if len(part) != chunk:
+                raise RuntimeError(f"short read at block {block_num}: {len(part)}/{chunk}")
+            out.extend(part)
+            left -= chunk
+            block_num += 1
+        self.abort()
+        self.ensure_idle()
+        return bytes(out)
+
+    def open(self):
+        try:
+            self.dev.set_configuration(self.info["cfg"])
+        except usb.core.USBError:
+            pass
+        try:
+            if self.dev.is_kernel_driver_active(self.info["intf"]):
+                self.dev.detach_kernel_driver(self.info["intf"])
+        except (NotImplementedError, usb.core.USBError):
+            pass
+        try:
+            usb.util.claim_interface(self.dev, self.info["intf"])
+        except usb.core.USBError as e:
+            raise RuntimeError(f"cannot claim DFU interface: {e}") from e
+        try:
+            self.dev.set_interface_altsetting(
+                interface=self.info["intf"],
+                alternate_setting=self.info["alt"])
+        except usb.core.USBError as e:
+            raise RuntimeError(f"cannot set alt setting: {e}") from e
+
+    def close(self):
+        try:
+            usb.util.release_interface(self.dev, self.info["intf"])
+        except usb.core.USBError:
+            pass
+        usb.util.dispose_resources(self.dev)
 
 
 def read_otp_from_device() -> bytes:
@@ -299,52 +412,16 @@ def read_otp_from_device() -> bytes:
     Flipper Zero must be in DFU mode (hold Back+Left on boot).
     On Windows: install WinUSB driver via Zadig for 'STM32 BOOTLOADER'.
     """
-    dev = find_dfu_device()
-    if dev is None:
+    info = find_dfu_device()
+    if info is None:
         raise RuntimeError("no_device")
 
-    # Windows: detach_kernel_driver not supported, skip silently
+    dfu = _Stm32Dfu(info)
+    dfu.open()
     try:
-        if dev.is_kernel_driver_active(0):
-            dev.detach_kernel_driver(0)
-    except (NotImplementedError, usb.core.USBError):
-        pass
-
-    dev.set_configuration()
-    cfg      = dev.get_active_configuration()
-    intf_num = cfg[(0, 0)].bInterfaceNumber
-    usb.util.claim_interface(dev, intf_num)
-
-    try:
-        # recover from error state if needed
-        status, state = _dfu_get_status(dev, intf_num)
-        if state == _ST_ERROR:
-            _dfu_clr_status(dev, intf_num)
-            state = _ST_IDLE
-        if state not in (_ST_IDLE, _ST_DNLOAD_IDLE, _ST_UPLOAD_IDLE):
-            _dfu_abort(dev, intf_num)
-            _dfu_wait(dev, intf_num, (_ST_IDLE,))
-
-        # Step 1: Set Address Pointer via DFU_DNLOAD wBlockNum=0
-        cmd = struct.pack("<BI", 0x21, OTP_ADDR_FIRST)
-        dev.ctrl_transfer(_RT_OUT, _DFU_DNLOAD, 0, intf_num, cmd)
-
-        # Step 2: GetStatus triggers execution; device goes dfuDNBUSY → dfuDNLOAD-IDLE
-        _dfu_wait(dev, intf_num, (_ST_DNLOAD_IDLE,))
-
-        # Step 3: DFU_UPLOAD wBlockNum=2 reads from address_pointer + 0
-        # (STM32 DFU: block 0 = special cmds, block 1 = addr-transfer_size, block 2 = addr+0)
-        data = dev.ctrl_transfer(_RT_IN, _DFU_UPLOAD, 2, intf_num, 32)
-
-        _dfu_abort(dev, intf_num)
-
+        return dfu.read_memory(OTP_ADDR_FIRST, 32)
     finally:
-        usb.util.release_interface(dev, intf_num)
-        usb.util.dispose_resources(dev)
-
-    if len(data) < 16:
-        raise ValueError("bad_data")
-    return bytes(data[:32])
+        dfu.close()
 
 
 # ── GUI ───────────────────────────────────────────────────────────────────────
@@ -597,21 +674,24 @@ async def main(page: ft.Page):
 
     # DFU device status indicator
     dfu_status_text = ft.Text(
-        "Устройство не найдено", size=11, color=TEXT_DIM,
+        T("dfu_not_found"), size=11, color=TEXT_DIM,
         font_family="Courier New",
     )
 
     def refresh_dfu_status(e=None):
         try:
-            dev = find_dfu_device()
-            found = dev is not None
+            info = find_dfu_device()
+            found = info is not None
+            vid = info["dev"].idVendor if found else 0
+            pid = info["dev"].idProduct if found else 0
         except RuntimeError:
             found = False
+            vid = pid = 0
         if found:
-            dfu_status_text.value = f"Flipper Zero DFU  [VID={DFU_VID:04X} PID={DFU_PID:04X}]"
+            dfu_status_text.value = f"Flipper Zero DFU  [VID={vid:04X} PID={pid:04X}]"
             dfu_status_text.color = OK_C
         else:
-            dfu_status_text.value = "Устройство не найдено"
+            dfu_status_text.value = T("dfu_not_found")
             dfu_status_text.color = TEXT_DIM
         page.update()
 
@@ -623,18 +703,23 @@ async def main(page: ft.Page):
         tooltip="Обновить",
     )
 
-    read_result_col = ft.Column([], spacing=5, scroll=ft.ScrollMode.AUTO)
-
-    read_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2,
-                                   color=ACCENT, visible=False)
-
     read_hint_text = ft.Text(
         T("read_hint"), size=10, color=TEXT_DIM, font_family=FONT,
         text_align=ft.TextAlign.CENTER,
     )
 
+    read_result_col = ft.Column(
+        [read_hint_text],
+        spacing=5,
+        scroll=ft.ScrollMode.AUTO,
+        expand=True,
+    )
+
+    read_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2,
+                                   color=ACCENT, visible=False)
+
     def render_parse_result(parsed: dict):
-        read_result_col.controls.clear()
+        read_result_col.controls.clear()  # removes hint too
         L = LANGS[lang_state["current"]]
 
         def row(field_key: str, value, highlight=False):
@@ -683,7 +768,7 @@ async def main(page: ft.Page):
     def do_read_otp(e):
         def worker():
             set_read_busy(True)
-            read_log("Поиск Flipper Zero в DFU режиме...", LOG_FG)
+            read_log(T("read_searching"), LOG_FG)
             try:
                 raw = read_otp_from_device()
                 read_log(T("read_reading"), LOG_FG)
@@ -693,9 +778,9 @@ async def main(page: ft.Page):
                 set_status("read_ok")
             except RuntimeError as ex:
                 if "no_device" in str(ex):
-                    read_log("✗  Flipper Zero в DFU режиме не найден", ERR)
+                    read_log(f"✗  {T('read_no_device')}", ERR)
                 elif "no_backend" in str(ex):
-                    read_log("✗  libusb не найден. Установите: pip install libusb-package", ERR)
+                    read_log(f"✗  {T('read_no_backend')}", ERR)
                 else:
                     read_log(f"✗  {ex}", ERR)
                 set_status("read_err", False)
@@ -715,6 +800,7 @@ async def main(page: ft.Page):
 
     def do_read_clear(e):
         read_result_col.controls.clear()
+        read_result_col.controls.append(read_hint_text)
         read_log_view.controls.clear()
         set_status("ready")
         page.update()
@@ -734,7 +820,7 @@ async def main(page: ft.Page):
         ),
     )
 
-    read_port_lbl = ft.Text("DFU Device", size=10, color=TEXT_DIM,
+    read_port_lbl = ft.Text(T("dfu_device_lbl"), size=10, color=TEXT_DIM,
                              font_family=FONT, weight=ft.FontWeight.W_500)
 
     read_top = panel(ft.Column([
@@ -748,15 +834,7 @@ async def main(page: ft.Page):
 
     read_left = panel(ft.Column([
         ft.Container(
-            content=ft.Column([
-                read_result_col,
-                ft.Container(
-                    content=read_hint_text,
-                    visible=True,
-                    alignment=ft.Alignment.CENTER,
-                    expand=True,
-                ),
-            ], spacing=0),
+            content=read_result_col,
             bgcolor=LOG_BG,
             border=ft.Border.all(1, BORDER),
             border_radius=6, padding=12, expand=True,
@@ -851,17 +929,20 @@ async def main(page: ft.Page):
             txt.value = T(key)
         gen_btn.content        = T("generate")
         merge_btn.content      = T("merge")
-        merge_btn.tooltip   = T("tooltip_merge")
-        browse_btn.tooltip  = T("tooltip_browse")
-        gen_log_title.value = T("log")
+        merge_btn.tooltip      = T("tooltip_merge")
+        browse_btn.tooltip     = T("tooltip_browse")
+        gen_log_title.value    = T("log")
         gen_clear_btn.content  = T("clear")
         read_btn.content       = T("read_btn")
         read_clear_btn.content = T("read_clear")
-        read_btn.content       = T("read_btn")
-        read_clear_btn.content = T("read_clear")
-        read_hint_text.value = T("read_hint")
-        status_text.value   = T("ready")
-        status_dot.bgcolor  = ACCENT
+        read_hint_text.value   = T("read_hint")
+        read_port_lbl.value    = T("dfu_device_lbl")
+        dfu_status_text.value  = T("dfu_not_found") if dfu_status_text.color == TEXT_DIM else dfu_status_text.value
+        tab_gen_btn.content    = T("tab_generate")
+        tab_read_btn.content   = T("tab_read")
+        lang_btn.content       = T("lang_btn")
+        status_text.value      = T("ready")
+        status_dot.bgcolor     = ACCENT
         page.update()
 
     def toggle_lang(e):
